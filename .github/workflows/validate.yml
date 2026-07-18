@@ -1,0 +1,101 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: fmt (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [terraform, opentofu]
+    env:
+      BIN: ${{ matrix.engine == 'opentofu' && 'tofu' || 'terraform' }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.engine == 'terraform'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+      - if: matrix.engine == 'opentofu'
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.12.4"
+          tofu_wrapper: false
+      - run: $BIN fmt -check -recursive -diff
+
+  validate:
+    name: validate ${{ matrix.dir }} (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [terraform, opentofu]
+        dir: [".", "examples/basic"]
+    env:
+      BIN: ${{ matrix.engine == 'opentofu' && 'tofu' || 'terraform' }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.engine == 'terraform'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+      - if: matrix.engine == 'opentofu'
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.12.4"
+          tofu_wrapper: false
+      - name: init + validate
+        working-directory: ${{ matrix.dir }}
+        run: |
+          $BIN init -backend=false
+          $BIN validate -no-color
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.63.1
+      - run: tflint --init --config "$(pwd)/.tflint.hcl"
+      - run: tflint --recursive --config "$(pwd)/.tflint.hcl"
+
+  security-scan:
+    name: security scan (checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          quiet: true
+          skip_path: .terraform
+
+  docs:
+    name: terraform-docs (check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-docs/gh-actions@v1
+        with:
+          working-dir: .
+          config-file: .terraform-docs.yml
+          output-file: README.md
+          output-method: inject
+          fail-on-diff: true

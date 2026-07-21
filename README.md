@@ -9,10 +9,12 @@
 The "what every new account gets" baseline, **CIS AWS Foundations v3.0.0-aligned**.
 Safe, universal defaults on by default — account-wide **S3 Block Public Access**,
 **default EBS encryption**, an **IAM password policy** (CIS 1.8 + 1.9), an
-**IAM Access Analyzer** (CIS 1.20), and an **IMDSv2 account default** (CIS 5.6) —
-plus opt-in hardening: a **customer-managed EBS KMS key**, **default-SG lockdown**
-(CIS 5.4), a **notifications SNS spine**, an account alias, and **default-VPC
-teardown**. Small and readable — a seam you grow, not a platform.
+**IAM Access Analyzer** (CIS 1.20), an **IMDSv2 account default** (CIS 5.6), and a
+**private spoke VPC** (private subnets + route tables + locked default SG, $0 — no
+NAT/IGW; requires a per-account `spoke_vpc_primary_cidr`) — plus opt-in hardening:
+a **customer-managed EBS KMS key**, **default-SG lockdown** (CIS 5.4), a
+**notifications SNS spine**, an account alias, and **default-VPC teardown**. Small
+and readable — a seam you grow, not a platform.
 
 > **CIS-ALIGNED, not certified.** Defaults map to specific CIS v3.0.0 controls
 > (noted per variable); this module does the *preventive/configuration* half.
@@ -117,6 +119,7 @@ front — no CLI, no script, no extra permissions needed.
 | ---- | ---- |
 | [aws_accessanalyzer_analyzer.account](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/accessanalyzer_analyzer) | resource |
 | [aws_default_security_group.restrict](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/default_security_group) | resource |
+| [aws_default_security_group.spoke](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/default_security_group) | resource |
 | [aws_ebs_default_kms_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ebs_default_kms_key) | resource |
 | [aws_ebs_encryption_by_default.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ebs_encryption_by_default) | resource |
 | [aws_ec2_instance_metadata_defaults.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_instance_metadata_defaults) | resource |
@@ -125,10 +128,15 @@ front — no CLI, no script, no extra permissions needed.
 | [aws_iam_service_linked_role.autoscaling](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_service_linked_role) | resource |
 | [aws_kms_alias.ebs_default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
 | [aws_kms_key.ebs_default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
+| [aws_route_table.spoke_private](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table) | resource |
+| [aws_route_table_association.spoke_private](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table_association) | resource |
 | [aws_s3_account_public_access_block.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_account_public_access_block) | resource |
 | [aws_sns_topic.notifications](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic) | resource |
 | [aws_sns_topic_policy.notifications](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic_policy) | resource |
 | [aws_sns_topic_subscription.notifications_email](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic_subscription) | resource |
+| [aws_subnet.spoke_private](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
+| [aws_vpc.spoke](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc) | resource |
+| [aws_vpc_ipv4_cidr_block_association.spoke](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipv4_cidr_block_association) | resource |
 | [terraform_data.delete_default_vpc](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 
 ## Inputs
@@ -152,6 +160,7 @@ front — no CLI, no script, no extra permissions needed.
 | enable\_imdsv2\_account\_default | Set the account+region EC2 instance-metadata default to require IMDSv2<br/>(http\_tokens = required) for NEW launches that do not specify their own<br/>metadata options. Does not touch existing instances or launches that set<br/>their own options, so there is no brick risk to running workloads. Leaves<br/>the PUT hop limit at "no preference" (omitted-option launches keep the AWS<br/>default of 1). Region-scoped (like default EBS encryption); apply per region.<br/>Requires aws provider >= 5.51.0 (see versions.tf). Free. | `bool` | `true` | no |
 | enable\_notifications\_topic | Create the account notifications SNS topic -- the single publish target<br/>("spine") that future budget, security, and CloudWatch-alarm features send<br/>to. Ships with a resource policy allowing in-account CloudWatch and AWS<br/>Budgets to publish; nothing publishes until a later feature is wired. Safe +<br/>free (an idle topic with no messages has no cost). | `bool` | `true` | no |
 | enable\_s3\_account\_public\_access\_block | Turn on the account-wide S3 Block Public Access. Safe default for every account. | `bool` | `true` | no |
+| enable\_spoke\_vpc | Create a PRIVATE-ONLY spoke VPC (VPC + private subnets + route tables + a<br/>locked zero-rule default SG). NO internet gateway, NO NAT, NO public subnets,<br/>so it costs $0 -- egress is intended to flow through a Transit Gateway hub<br/>(Pro). Enabled BY DEFAULT, but spoke\_vpc\_primary\_cidr is REQUIRED (a<br/>precondition fails the plan with a clear message if this is on and no CIDR is<br/>set), because a shared default CIDR collides once accounts are TGW-attached or<br/>peered. This is a NEW non-default VPC and does not conflict with<br/>remove\_default\_vpc / restrict\_default\_security\_group (which target the DEFAULT<br/>VPC). Set false to skip the VPC entirely. | `bool` | `true` | no |
 | exec\_role\_arn | Optional role ARN the teardown script assumes before acting. REQUIRED when<br/>the provider assumes into a member account, because local-exec does not<br/>inherit the provider's credentials -- set it to the same role the provider<br/>uses (e.g. the account's OrganizationAccountAccessRole). Empty = ambient creds. | `string` | `""` | no |
 | notification\_emails | Email addresses to subscribe to the notifications topic. Each creates an<br/>email subscription that AWS sends a confirmation link to; it stays "pending<br/>confirmation" (Terraform cannot auto-confirm) until a recipient clicks the<br/>link. Default [] = topic-only seam, no subscriptions. | `list(string)` | `[]` | no |
 | notifications\_topic\_name | Name for the notifications SNS topic. Empty = derive "<account\_name>-notifications".<br/>Changing it replaces the topic (and drops any subscriptions/confirmations). | `string` | `""` | no |
@@ -167,6 +176,11 @@ front — no CLI, no script, no extra permissions needed.
 | remove\_default\_vpc | Delete the region's default VPC (subnets -> internet gateway -> VPC) via a<br/>local-exec teardown script. Requires the AWS CLI on the machine running<br/>Terraform. Covers only `region`; run per region for full coverage. | `bool` | `false` | no |
 | restrict\_default\_security\_group | CIS v3.0.0 control 5.4: strip ALL ingress and egress rules from the DEFAULT<br/>security group of the provider region's default VPC (plus any VPCs in<br/>restrict\_default\_security\_group\_vpc\_ids). The default SG is ADOPTED, never<br/>created or deleted. NO-OP when the account has no default VPC or when<br/>remove\_default\_vpc is set. Operates on the provider's region only; run per<br/>region for full coverage.<br/><br/>DEFAULT OFF (opt-in). This module is dual-published as a standalone registry<br/>module applied to EXISTING accounts, where resources may still sit on the<br/>default SG; enabling severs their connectivity (especially egress). Safe to<br/>enable on freshly bootstrapped accounts. WARNING: enabling is NOT reversible<br/>by toggling off -- removal only drops the resource from state and does NOT<br/>restore stripped rules; re-add them manually to undo. | `bool` | `false` | no |
 | restrict\_default\_security\_group\_vpc\_ids | Additional VPC IDs, IN THE PROVIDER'S REGION, whose default security group<br/>should also be locked to zero rules. Opt-in and empty by default: list only<br/>VPCs you own and do not manage elsewhere -- their default SG is adopted into<br/>THIS state. The region's default VPC is covered automatically. A stale,<br/>mistyped, or cross-region id will FAIL the apply. Only takes effect while<br/>restrict\_default\_security\_group is true. | `list(string)` | `[]` | no |
+| spoke\_vpc\_az\_count | Number of Availability Zones to spread private subnets across (one subnet per<br/>AZ per source CIDR). The module reads the region's available AZs and takes the<br/>first N deterministically, clamping to however many the region actually offers<br/>(regions with fewer AZs never error). Default 2. | `number` | `2` | no |
+| spoke\_vpc\_name | Name tag for the spoke VPC and the base for its subnet/route-table/SG Name<br/>tags. Empty (default) derives "<account\_name>-spoke". Purely cosmetic (tags);<br/>changing it does not force replacement of the VPC. | `string` | `""` | no |
+| spoke\_vpc\_primary\_cidr | Primary IPv4 CIDR for the spoke VPC (e.g. "10.0.0.0/16"). REQUIRED when<br/>enable\_spoke\_vpc is true -- deliberately no default, because account-baseline<br/>runs PER ACCOUNT and a shared CIDR collides the moment accounts are<br/>TGW-attached or peered. Private subnets are carved from this range (and from<br/>spoke\_vpc\_secondary\_cidrs) via cidrsubnet. | `string` | `""` | no |
+| spoke\_vpc\_secondary\_cidrs | Additional IPv4 CIDRs to associate with the spoke VPC (via<br/>aws\_vpc\_ipv4\_cidr\_block\_association). Private subnets are carved from these<br/>too, one per AZ, using the same spoke\_vpc\_subnet\_newbits. Each must be a valid<br/>IPv4 CIDR and must not overlap the primary or each other (AWS rejects<br/>overlapping associations at apply). Default [] = primary range only. | `list(string)` | `[]` | no |
+| spoke\_vpc\_subnet\_newbits | Additional prefix bits added to each source CIDR when carving subnets<br/>(cidrsubnet newbits). E.g. 8 turns a /16 into /24 subnets. Must leave room for<br/>spoke\_vpc\_az\_count subnets per source CIDR: 2^spoke\_vpc\_subnet\_newbits >=<br/>spoke\_vpc\_az\_count (enforced by a precondition on aws\_vpc.spoke, not here,<br/>because cross-variable references in a variable validation require<br/>Terraform/OpenTofu >= 1.9 and this module supports >= 1.5). Default 8. | `number` | `8` | no |
 | tags | Tags to apply to taggable baseline resources. The current baseline resources<br/>(account-wide S3 Block Public Access, default EBS encryption) are<br/>account-global toggles that are not taggable, so tags are held for future<br/>taggable additions and echoed via the `tags` output for callers to reuse. | `map(string)` | `{}` | no |
 
 ## Outputs
@@ -188,6 +202,13 @@ front — no CLI, no script, no extra permissions needed.
 | notifications\_topic\_name | Name of the account notifications SNS topic, or null when disabled. |
 | restricted\_default\_security\_group\_vpc\_ids | VPC IDs whose default security group this baseline locked to zero rules (provider-region default VPC plus any explicitly opted-in). |
 | s3\_public\_access\_block\_enabled | Whether the account-wide S3 Block Public Access was applied. |
+| spoke\_default\_security\_group\_id | ID of the spoke VPC's locked (zero-rule) default security group, or null when disabled. |
+| spoke\_private\_route\_table\_ids | Map of subnet key to private route-table ID; the Pro TGW layer adds egress routes to these. |
+| spoke\_private\_subnet\_ids | Map of subnet key ("<source-cidr>-<az>") to private subnet ID. Consumed by the Pro TGW layer to attach the VPC. |
+| spoke\_vpc\_enabled | Whether the private spoke VPC was created in this account/region. |
+| spoke\_vpc\_id | ID of the private spoke VPC, or null when disabled. |
+| spoke\_vpc\_primary\_cidr | Primary IPv4 CIDR of the spoke VPC, or null when disabled. |
+| spoke\_vpc\_secondary\_cidrs | Secondary IPv4 CIDRs associated with the spoke VPC (sorted). |
 | tags | The tags passed to this baseline, for callers to reuse on account-level resources they add. |
 <!-- END_TF_DOCS -->
 

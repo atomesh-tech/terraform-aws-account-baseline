@@ -440,3 +440,161 @@ resource "aws_sns_topic_subscription" "notifications_email" {
   protocol  = "email"
   endpoint  = each.value
 }
+
+# ── Private spoke VPC (FREE scaffold) — CIS v3.0.0 5.4 for the new VPC ─────────
+# A PRIVATE-ONLY spoke: VPC + private subnets + route tables + a locked default
+# SG. NO IGW, NO NAT, NO public subnets => $0 (egress flows through the Pro
+# Transit Gateway hub later). Enabled by default but the primary CIDR is REQUIRED
+# (no baked default): account-baseline runs PER ACCOUNT and a shared CIDR collides
+# the moment accounts are TGW-attached/peered. This is a NEW non-default VPC, so
+# it does NOT conflict with remove_default_vpc / restrict_default_security_group
+# (both target the DEFAULT VPC). aws_ec2_instance_metadata_defaults / EBS-default
+# are account/region toggles unrelated to a specific VPC.
+
+data "aws_availability_zones" "spoke" {
+  count = var.enable_spoke_vpc ? 1 : 0
+  state = "available"
+
+  # Exclude Local Zones / opt-in Wavelength AZs: subnets in a non-opted-in zone
+  # fail at apply. Keeps the "first N AZs" deterministic and always launchable.
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+locals {
+  spoke_vpc_enabled = var.enable_spoke_vpc
+  spoke_vpc_name    = coalesce(var.spoke_vpc_name, "${var.account_name}-spoke")
+
+  # Primary first, then any secondary ranges — subnets are carved from all of them.
+  spoke_subnet_source_cidrs = concat(
+    [var.spoke_vpc_primary_cidr],
+    var.spoke_vpc_secondary_cidrs,
+  )
+
+  spoke_az_all = local.spoke_vpc_enabled ? data.aws_availability_zones.spoke[0].names : []
+
+  # Take the first N deterministically; clamp to what the region actually offers
+  # so a region with fewer AZs than spoke_vpc_az_count never errors.
+  spoke_az_names = slice(
+    local.spoke_az_all,
+    0,
+    min(var.spoke_vpc_az_count, length(local.spoke_az_all)),
+  )
+
+  # One /(prefix+newbits) private subnet per (source CIDR x AZ). Guarded on:
+  #   (1) a non-empty primary CIDR so cidrsubnet is NEVER called on "" (that throws
+  #       a cryptic "invalid CIDR expression" during plan — verified); and
+  #   (2) 2^newbits >= az_count so cidrsubnet is never handed an overflowing netnum
+  #       (that throws "prefix extension of N does not accommodate a subnet numbered M").
+  # When either guard fails this stays {} and the aws_vpc preconditions surface the
+  # clean message(s) instead of a raw provider/function error.
+  #
+  # Subnet map is keyed by SOURCE-CIDR value + AZ (NOT list index) so appending or
+  # reordering spoke_vpc_secondary_cidrs never re-addresses an existing subnet —
+  # stable per the COMPATIBILITY contract. (Comment kept out of the comprehension
+  # body: some HCL scanners mis-lex a comment between `for … :` and the key expr.)
+  spoke_subnets = local.spoke_vpc_enabled && var.spoke_vpc_primary_cidr != "" && pow(2, var.spoke_vpc_subnet_newbits) >= var.spoke_vpc_az_count ? merge([
+    for cidr in local.spoke_subnet_source_cidrs : {
+      for ai, az in local.spoke_az_names :
+      "${cidr}-${az}" => {
+        cidr_block        = cidrsubnet(cidr, var.spoke_vpc_subnet_newbits, ai)
+        availability_zone = az
+      }
+    }
+  ]...) : {}
+}
+
+resource "aws_vpc" "spoke" {
+  #checkov:skip=CKV2_AWS_11:VPC flow logs are a Pro (detective/logging) feature per product positioning; the FREE tier ships the private VPC scaffold only. Enable in the Pro networking layer.
+  count = var.enable_spoke_vpc ? 1 : 0
+
+  cidr_block           = var.spoke_vpc_primary_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = merge(var.tags, { Name = local.spoke_vpc_name })
+
+  lifecycle {
+    precondition {
+      # Verified: this fires BEFORE the provider's own cidr_block validation, so
+      # the operator sees THIS message (not a raw provider error) on empty CIDR.
+      condition     = var.spoke_vpc_primary_cidr != ""
+      error_message = "enable_spoke_vpc = true requires spoke_vpc_primary_cidr to be set to a non-empty IPv4 CIDR (e.g. \"10.0.0.0/16\"). There is deliberately no default: account-baseline runs PER ACCOUNT and a shared default CIDR collides the moment accounts are TGW-attached or peered. Set a unique CIDR per account, or set enable_spoke_vpc = false."
+    }
+
+    # Cross-variable check lives HERE (NOT in variable validation): referencing
+    # another variable inside a variable{} validation requires Terraform/OpenTofu
+    # >= 1.9, but this module supports >= 1.5 (see versions.tf). A resource
+    # precondition compares both variables on every supported version and pairs
+    # with the spoke_subnets guard above (verified on TF 1.8.5).
+    precondition {
+      condition     = pow(2, var.spoke_vpc_subnet_newbits) >= var.spoke_vpc_az_count
+      error_message = "spoke_vpc_subnet_newbits is too small for spoke_vpc_az_count: need 2^spoke_vpc_subnet_newbits >= spoke_vpc_az_count subnets per source CIDR (e.g. newbits 8 supports up to 256 AZs). Increase spoke_vpc_subnet_newbits or lower spoke_vpc_az_count."
+    }
+  }
+}
+
+# Secondary IPv4 ranges (optional). Subnets can be carved from these too.
+resource "aws_vpc_ipv4_cidr_block_association" "spoke" {
+  for_each = local.spoke_vpc_enabled ? toset(var.spoke_vpc_secondary_cidrs) : toset([])
+
+  vpc_id     = aws_vpc.spoke[0].id
+  cidr_block = each.value
+}
+
+resource "aws_subnet" "spoke_private" {
+  for_each = local.spoke_subnets
+
+  vpc_id            = aws_vpc.spoke[0].id
+  cidr_block        = each.value.cidr_block
+  availability_zone = each.value.availability_zone
+
+  # Private-only spoke: never auto-assign public IPs (also satisfies CKV_AWS_130).
+  map_public_ip_on_launch = false
+
+  tags = merge(var.tags, { Name = "${local.spoke_vpc_name}-private-${each.key}" })
+
+  # Subnets carved from a secondary range need its association to exist first
+  # (and on destroy, subnets must go before the association is removed).
+  depends_on = [aws_vpc_ipv4_cidr_block_association.spoke]
+}
+
+resource "aws_route_table" "spoke_private" {
+  for_each = local.spoke_subnets
+
+  vpc_id = aws_vpc.spoke[0].id
+
+  # Only the implicit local route: NO IGW, NO NAT, NO TGW route here. The Pro
+  # Transit Gateway layer adds the egress/cross-account routes to these tables.
+  tags = merge(var.tags, { Name = "${local.spoke_vpc_name}-private-${each.key}" })
+}
+
+resource "aws_route_table_association" "spoke_private" {
+  for_each = local.spoke_subnets
+
+  subnet_id      = aws_subnet.spoke_private[each.key].id
+  route_table_id = aws_route_table.spoke_private[each.key].id
+}
+
+# Lock the SPOKE VPC's own auto-created default SG to zero rules (CIS 5.4 applied
+# to the NEW VPC). aws_default_security_group ADOPTS the SG AWS created with this
+# VPC; with no ingress/egress blocks it strips every rule => zero in + zero out.
+# DISTINCT from aws_default_security_group.restrict (which adopts the DEFAULT
+# VPC's SG) — different resource address, different target, no overlap. Do NOT set
+# description (immutable on a default SG). Removing this only drops it from state
+# (does not restore rules), so teardown never bricks.
+#
+# vpc_id uses count.index (NOT a literal [0]): functionally identical at apply
+# (count.index == 0 when count == 1), but it lets Checkov's CKV2_AWS_12 graph
+# check resolve the aws_vpc -> aws_default_security_group edge. With a literal [0]
+# Checkov's static resolver cannot follow the index across the count and CKV2_AWS_12
+# FAILS -> red security-scan job (verified: checkov 3.3.8 exit 1 with [0], exit 0 with count.index).
+resource "aws_default_security_group" "spoke" {
+  count = var.enable_spoke_vpc ? 1 : 0
+
+  vpc_id = aws_vpc.spoke[count.index].id
+
+  tags = merge(var.tags, { Name = "${local.spoke_vpc_name}-default-locked" })
+}

@@ -77,3 +77,38 @@ output "notifications_topic_name" {
   description = "Name of the account notifications SNS topic, or null when disabled."
   value       = one(aws_sns_topic.notifications[*].name)
 }
+
+output "spoke_vpc_enabled" {
+  description = "Whether the private spoke VPC was created in this account/region."
+  value       = var.enable_spoke_vpc
+}
+
+output "spoke_vpc_id" {
+  description = "ID of the private spoke VPC, or null when disabled."
+  value       = one(aws_vpc.spoke[*].id)
+}
+
+output "spoke_vpc_primary_cidr" {
+  description = "Primary IPv4 CIDR of the spoke VPC, or null when disabled."
+  value       = one(aws_vpc.spoke[*].cidr_block)
+}
+
+output "spoke_vpc_secondary_cidrs" {
+  description = "Secondary IPv4 CIDRs associated with the spoke VPC (sorted)."
+  value       = sort([for a in aws_vpc_ipv4_cidr_block_association.spoke : a.cidr_block])
+}
+
+output "spoke_private_subnet_ids" {
+  description = "Map of subnet key (\"<source-cidr>-<az>\") to private subnet ID. Consumed by the Pro TGW layer to attach the VPC."
+  value       = { for k, s in aws_subnet.spoke_private : k => s.id }
+}
+
+output "spoke_private_route_table_ids" {
+  description = "Map of subnet key to private route-table ID; the Pro TGW layer adds egress routes to these."
+  value       = { for k, rt in aws_route_table.spoke_private : k => rt.id }
+}
+
+output "spoke_default_security_group_id" {
+  description = "ID of the spoke VPC's locked (zero-rule) default security group, or null when disabled."
+  value       = one(aws_default_security_group.spoke[*].id)
+}

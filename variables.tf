@@ -358,3 +358,95 @@ variable "notification_emails" {
   type        = list(string)
   default     = []
 }
+
+# ── Private spoke VPC (FREE scaffold) ─────────────────────────────────────────
+
+variable "enable_spoke_vpc" {
+  description = <<-EOT
+    Create a PRIVATE-ONLY spoke VPC (VPC + private subnets + route tables + a
+    locked zero-rule default SG). NO internet gateway, NO NAT, NO public subnets,
+    so it costs $0 -- egress is intended to flow through a Transit Gateway hub
+    (Pro). Enabled BY DEFAULT, but spoke_vpc_primary_cidr is REQUIRED (a
+    precondition fails the plan with a clear message if this is on and no CIDR is
+    set), because a shared default CIDR collides once accounts are TGW-attached or
+    peered. This is a NEW non-default VPC and does not conflict with
+    remove_default_vpc / restrict_default_security_group (which target the DEFAULT
+    VPC). Set false to skip the VPC entirely.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "spoke_vpc_primary_cidr" {
+  description = <<-EOT
+    Primary IPv4 CIDR for the spoke VPC (e.g. "10.0.0.0/16"). REQUIRED when
+    enable_spoke_vpc is true -- deliberately no default, because account-baseline
+    runs PER ACCOUNT and a shared CIDR collides the moment accounts are
+    TGW-attached or peered. Private subnets are carved from this range (and from
+    spoke_vpc_secondary_cidrs) via cidrsubnet.
+  EOT
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.spoke_vpc_primary_cidr == "" || can(cidrhost(var.spoke_vpc_primary_cidr, 0))
+    error_message = "spoke_vpc_primary_cidr must be empty or a valid IPv4 CIDR (e.g. \"10.0.0.0/16\")."
+  }
+}
+
+variable "spoke_vpc_secondary_cidrs" {
+  description = <<-EOT
+    Additional IPv4 CIDRs to associate with the spoke VPC (via
+    aws_vpc_ipv4_cidr_block_association). Private subnets are carved from these
+    too, one per AZ, using the same spoke_vpc_subnet_newbits. Each must be a valid
+    IPv4 CIDR and must not overlap the primary or each other (AWS rejects
+    overlapping associations at apply). Default [] = primary range only.
+  EOT
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = alltrue([for c in var.spoke_vpc_secondary_cidrs : can(cidrhost(c, 0))])
+    error_message = "Every entry in spoke_vpc_secondary_cidrs must be a valid IPv4 CIDR."
+  }
+}
+
+variable "spoke_vpc_az_count" {
+  description = <<-EOT
+    Number of Availability Zones to spread private subnets across (one subnet per
+    AZ per source CIDR). The module reads the region's available AZs and takes the
+    first N deterministically, clamping to however many the region actually offers
+    (regions with fewer AZs never error). Default 2.
+  EOT
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.spoke_vpc_az_count >= 1 && var.spoke_vpc_az_count <= 16
+    error_message = "spoke_vpc_az_count must be between 1 and 16."
+  }
+}
+
+variable "spoke_vpc_subnet_newbits" {
+  description = <<-EOT
+    Additional prefix bits added to each source CIDR when carving subnets
+    (cidrsubnet newbits). E.g. 8 turns a /16 into /24 subnets. Must leave room for
+    spoke_vpc_az_count subnets per source CIDR: 2^spoke_vpc_subnet_newbits >=
+    spoke_vpc_az_count (enforced by a precondition on aws_vpc.spoke, not here,
+    because cross-variable references in a variable validation require
+    Terraform/OpenTofu >= 1.9 and this module supports >= 1.5). Default 8.
+  EOT
+  type        = number
+  default     = 8
+  validation {
+    condition     = var.spoke_vpc_subnet_newbits >= 1 && var.spoke_vpc_subnet_newbits <= 16
+    error_message = "spoke_vpc_subnet_newbits must be between 1 and 16."
+  }
+}
+
+variable "spoke_vpc_name" {
+  description = <<-EOT
+    Name tag for the spoke VPC and the base for its subnet/route-table/SG Name
+    tags. Empty (default) derives "<account_name>-spoke". Purely cosmetic (tags);
+    changing it does not force replacement of the VPC.
+  EOT
+  type        = string
+  default     = ""
+}

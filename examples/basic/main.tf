@@ -33,6 +33,14 @@ module "baseline" {
   enable_s3_account_public_access_block = true
   enable_default_ebs_encryption         = true
 
+  # The private spoke VPC is ON by default but REQUIRES a CIDR — set a UNIQUE
+  # range per account (a shared CIDR collides once accounts are TGW-attached or
+  # peered). It's private-only (no IGW/NAT/public subnets → $0). Optional extras:
+  #   spoke_vpc_secondary_cidrs = ["100.64.0.0/16"]
+  #   spoke_vpc_az_count        = 2
+  # Set enable_spoke_vpc = false to skip it entirely.
+  spoke_vpc_primary_cidr = "10.20.0.0/16"
+
   # Default-VPC teardown is OFF by default. If you enable it, read the README:
   # it shells out to an AWS CLI v2 + bash script, only covers `region`, and when
   # your provider assumes into the account you MUST pass exec_role_arn (the same
@@ -49,4 +57,12 @@ module "baseline" {
 
 output "account_name" {
   value = module.baseline.account_name
+}
+
+output "spoke_vpc_id" {
+  value = module.baseline.spoke_vpc_id
+}
+
+output "spoke_private_subnet_ids" {
+  value = module.baseline.spoke_private_subnet_ids
 }
